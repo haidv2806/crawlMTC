@@ -2,11 +2,11 @@
 # Lấy thông tin sách và tải ảnh bìa từ metruyenchu.co
 
 import re
-import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
 
-from core.config import MTC_BASE, MTC_HEADERS
+from core.config import MTC_BASE
+from core.req_config import proxy_get
 
 
 def parse_book_info(book_url: str) -> dict | None:
@@ -15,7 +15,7 @@ def parse_book_info(book_url: str) -> dict | None:
     Trả về dict: name, authors, status, tags, cover_url, description, book_slug, book_id
     """
     try:
-        resp = requests.get(book_url, headers=MTC_HEADERS, timeout=30)
+        resp = proxy_get(book_url)
         if resp.status_code != 200:
             print(f"  [book] HTTP {resp.status_code} khi GET {book_url}")
             return None
@@ -136,7 +136,7 @@ def download_cover(cover_url: str, save_path: str) -> bool:
     if not cover_url:
         return False
     try:
-        resp = requests.get(cover_url, headers=MTC_HEADERS, timeout=30)
+        resp = proxy_get(cover_url)
         if resp.status_code == 200:
             with open(save_path, "wb") as f:
                 f.write(resp.content)

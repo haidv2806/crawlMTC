@@ -12,10 +12,10 @@
 import re
 import json
 import asyncio
-import requests
 from playwright.async_api import async_playwright
 
 from core.config import MTC_BASE, MTC_HEADERS
+from core.req_config import proxy_post
 
 
 # ------------------------------------------------------------------ #
@@ -150,10 +150,8 @@ def fetch_all_chapters(
     }])
 
     try:
-        resp = requests.post(book_url, headers=headers, data=body, timeout=60)
+        resp = proxy_post(book_url, headers=headers, data=body, use_proxy=True)
         print(f"  [chapters] Status: {resp.status_code}, Size: {len(resp.text)} chars")
-        with open("F:/crawlSTV/crawlMTC/rsc_debug.txt", "w", encoding="utf-8") as sdf:
-            sdf.write(resp.text)
         if resp.status_code != 200:
             return []
         chapters = parse_chapters_from_rsc(resp.text, book_slug)
@@ -189,7 +187,7 @@ def fetch_chapters_paginated(
             "isNewest": False,
         }])
         try:
-            resp = requests.post(book_url, headers=headers, data=body, timeout=30)
+            resp = proxy_post(book_url, headers=headers, data=body, use_proxy=True)
         except Exception as e:
             print(f"  [chapters] Lỗi trang {page}: {e}")
             break

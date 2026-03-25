@@ -4,6 +4,12 @@
 #   python crawl_mtc.py --url https://metruyenchu.co/truyen/<slug>
 #   python crawl_mtc.py --pages 2 --sort totalViews
 #   python crawl_mtc.py --url https://... --limit 5   (giới hạn 5 chương đầu)
+#
+# Tính năng:
+#   1. Proxy rotation (round-robin, không cần CloudFlare bypass)
+#   2. Crawl chapters trong volume song song (asyncio.gather)
+#   3. Skip sách đã crawl (skip_books.json)
+#   4. Retry vô hạn khi gặp 429 (đợi 60s)
 
 import argparse
 import asyncio
@@ -15,11 +21,19 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-from core.config import BASE_URL, CHAPTERS_PER_VOLUME, HEADERS, MTC_BASE, MTC_HEADERS
+from core.config import (
+    BASE_URL, CHAPTERS_PER_VOLUME, HEADERS,
+    MTC_BASE, MTC_HEADERS,
+    should_skip_book, add_skip_book,
+    get_next_proxy,
+)
 from core.mtc_categories import map_tags
 from scrapers.mtc_book import download_cover, parse_book_info
 from scrapers.mtc_chapters import get_chapters
-from scrapers.mtc_chapter_content import get_chapter_content
+from scrapers.mtc_chapter_content import get_chapter_content_async
+
+# Rate limit: 100 req/min => đợi 60s khi gặp 429
+RATE_LIMIT_WAIT = 60
 
 
 # ------------------------------------------------------------------ #
@@ -34,7 +48,8 @@ def fetch_book_list(page: int = 1, sort: str = "totalViews") -> list[str]:
     url = f"{MTC_BASE}/danh-sach"
     params = {"page": str(page), "sort": sort}
     try:
-        resp = requests.get(url, params=params, headers=MTC_HEADERS, timeout=30)
+        proxy = get_next_proxy()
+        resp = requests.get(url, params=params, headers=MTC_HEADERS, proxies=proxy, timeout=30)
         soup = BeautifulSoup(resp.text, "html.parser")
         urls: list[str] = []
         seen: set[str] = set()
@@ -52,8 +67,27 @@ def fetch_book_list(page: int = 1, sort: str = "totalViews") -> list[str]:
 
 
 # ------------------------------------------------------------------ #
-# Backend API calls (giống crawl_stv.py)                              #
+# Backend API calls                                                    #
 # ------------------------------------------------------------------ #
+
+def _backend_post(url: str, **kwargs) -> requests.Response:
+    """
+    POST lên backend (localhost:3000) với retry 429 vô hạn.
+    Không dùng proxy cho local backend.
+    """
+    import time
+    while True:
+        try:
+            resp = requests.post(url, headers=HEADERS, timeout=60, **kwargs)
+            if resp.status_code == 429:
+                print(f"  [backend] 429 Rate Limit. Đợi {RATE_LIMIT_WAIT}s...")
+                time.sleep(RATE_LIMIT_WAIT)
+                continue
+            return resp
+        except Exception as e:
+            print(f"  [backend] Lỗi: {e}. Thử lại sau 5s...")
+            time.sleep(5)
+
 
 def api_create_book(info: dict, cover_path: str) -> int | None:
     """Tạo sách trên backend. Trả về backend book_id."""
@@ -73,7 +107,7 @@ def api_create_book(info: dict, cover_path: str) -> int | None:
         with open(cover_path, "rb") as img_f:
             ext = Path(cover_path).suffix or ".jpg"
             files = {"image": (f"cover{ext}", img_f, "image/jpeg")}
-            resp = requests.post(url, data=data, files=files, headers=HEADERS, timeout=60)
+            resp = _backend_post(url, data=data, files=files)
         print(f"  [book] create: {resp.status_code} | {resp.text[:200]}")
         if resp.status_code not in (200, 201):
             return None
@@ -86,23 +120,17 @@ def api_create_book(info: dict, cover_path: str) -> int | None:
 def api_create_volume(book_id: int, volume_name: str) -> int | None:
     """Tạo volume. Trả về volume_id."""
     url = f"{BASE_URL}/Book/Volume/create"
-    try:
-        resp = requests.post(
-            url,
-            json={"book_id": book_id, "volume_name": volume_name, "status": "completed"},
-            headers=HEADERS,
-            timeout=30,
-        )
-        print(f"  [vol] {volume_name}: {resp.status_code}")
-        if resp.status_code not in (200, 201):
-            return None
-        data = resp.json().get("data")
-        if data and isinstance(data, dict):
-            return data.get("volume_id")
-        return resp.json().get("volume_id") or resp.json().get("id")
-    except Exception as e:
-        print(f"  [vol] Lỗi: {e}")
+    resp = _backend_post(
+        url,
+        json={"book_id": book_id, "volume_name": volume_name, "status": "completed"},
+    )
+    print(f"  [vol] {volume_name}: {resp.status_code}")
+    if resp.status_code not in (200, 201):
         return None
+    data = resp.json().get("data")
+    if data and isinstance(data, dict):
+        return data.get("volume_id")
+    return resp.json().get("volume_id") or resp.json().get("id")
 
 
 def api_create_chapter(volume_id: int, chapter_name: str, content: str) -> bool:
@@ -123,7 +151,7 @@ def api_create_chapter(volume_id: int, chapter_name: str, content: str) -> bool:
         }
         with open(tmp, "rb") as md_f:
             files = {"markdownFile": ("chapter.md", md_f, "text/markdown")}
-            resp = requests.post(url, data=data, files=files, headers=HEADERS, timeout=120)
+            resp = _backend_post(url, data=data, files=files)
         result = resp.status_code in (200, 201)
     except Exception as e:
         print(f"  [chap] Lỗi API: {e}")
@@ -146,18 +174,68 @@ def default_cover_path() -> str:
 
 
 # ------------------------------------------------------------------ #
+# Parallel chapter crawl across volumes (same position)               #
+# ------------------------------------------------------------------ #
+
+async def _crawl_and_upload_chapter(
+    idx: int,
+    total: int,
+    ch: dict,
+    volume_id: int,
+) -> None:
+    """Crawl 1 chương và upload lên backend."""
+    ch_url   = ch["url"]
+    ch_title = ch.get("name") or f"Chương {idx}"
+
+    result = await get_chapter_content_async(ch_url)
+    if not result.get("ok"):
+        print(f"  [{idx}/{total}] Lỗi: {result.get('error')} — {ch_url}")
+        return
+
+    content = result.get("content", "")
+    if not content:
+        print(f"  [{idx}/{total}] Nội dung trống, bỏ qua.")
+        return
+
+    chap_name = result.get("title") or ch_title
+    success   = api_create_chapter(volume_id, chap_name, content)
+    status    = "OK" if success else "FAIL"
+    print(f"  [{idx}/{total}] {status}: {str(chap_name)[:60]}")
+
+
+# ------------------------------------------------------------------ #
 # Core crawl logic                                                     #
 # ------------------------------------------------------------------ #
 
-async def crawl_book(book_url: str, chapter_limit: int | None = None):
+async def crawl_book(
+    book_url: str,
+    chapter_limit: int | None = None,
+    max_concurrent: int = 5,
+):
     """
     Crawl 1 cuốn sách:
+      0. Skip nếu đã crawl trước đó
       1. Lấy thông tin sách → ảnh bìa → tạo sách backend
       2. Lấy danh sách chương
-      3. Chia volume (100 chương/vol) → tạo volume + upload từng chương .md
+      3. Tạo THẤT CẢ volume tuần tự (sequential)
+      4. Sau đó cào song song theo hàng ngang:
+         - cào chương đầu tiên của mỗi volume đồng thời
+         - rồi chương thứ 2 của mỗi volume đồng thời
+         - v.v... (giống hresizable "heatmap" theo cột)
+      5. Thêm vào skip list sau khi thành công
+    Ví dụ 1000 chương (10 vol):
+      - Vừng 1: tạo vol1..vol10 (sequential)
+      - Vừng 2: crawl ch1(v1)+ch101(v2)+ch201(v3)+...+ch901(v10) cùng lúc
+                  crawl ch2(v1)+ch102(v2)+ch202(v3)+...+ch902(v10) cùng lúc
+                  ...
     """
     print(f"\n{'='*60}")
     print(f"[book] {book_url}")
+
+    # 0. Skip nếu đã crawl
+    if should_skip_book(book_url):
+        print(f"  [skip] Bỏ qua (đã crawl trước đó): {book_url}")
+        return
 
     # 1. Lấy thông tin sách
     info = parse_book_info(book_url)
@@ -204,39 +282,66 @@ async def crawl_book(book_url: str, chapter_limit: int | None = None):
         return
     print(f"  [book] Đã tạo sách backend_book_id={backend_book_id}")
 
-    # 5. Chia volume và upload chương
+    # 5. Chia chunk thành các volume
     total = len(chapters)
+    volumes: list[dict] = []   # [{"name": ..., "volume_id": ..., "chapters": [...]}]
+
     for vol_start in range(0, total, CHAPTERS_PER_VOLUME):
-        chunk   = chapters[vol_start : vol_start + CHAPTERS_PER_VOLUME]
+        chunk    = chapters[vol_start : vol_start + CHAPTERS_PER_VOLUME]
         vol_end  = vol_start + len(chunk)
         vol_name = f"Chương {vol_start + 1} - {vol_end}"
 
+        # Tạo volume tuần tự
         volume_id = api_create_volume(backend_book_id, vol_name)
         if not volume_id:
             print(f"  [vol] Không tạo được volume {vol_name}, bỏ qua.")
             continue
 
-        for idx, ch in enumerate(chunk, start=vol_start + 1):
-            ch_url   = ch["url"]
-            ch_title = ch.get("name") or f"Chương {idx}"
+        volumes.append({
+            "name":      vol_name,
+            "volume_id": volume_id,
+            "chapters":  chunk,
+            "offset":    vol_start,   # global chapter index offset
+        })
 
-            result = get_chapter_content(ch_url)
-            if not result.get("ok"):
-                print(f"  [{idx}/{total}] Lỗi: {result.get('error')} — {ch_url}")
-                continue
+    if not volumes:
+        print("  [book] Không tạo được bất kỳ volume nào.")
+        return
 
-            content = result.get("content", "")
-            if not content:
-                print(f"  [{idx}/{total}] Nội dung trống, bỏ qua.")
-                continue
+    print(f"  [vol] Đã tạo {len(volumes)} volume. Bắt đầu cào chương song song theo hàng ngang...")
 
-            chap_name = result.get("title") or ch_title
-            success   = api_create_chapter(volume_id, chap_name, content)
-            status    = "OK" if success else "FAIL"
-            print(f"  [{idx}/{total}] {status}: {str(chap_name)[:60]}")
+    # 6. Tời đa số chương trong 1 volume
+    max_chapters_in_vol = max(len(v["chapters"]) for v in volumes)
 
-            # Delay nhỏ để tránh rate limit
-            await asyncio.sleep(1)
+    # 7. Cào các chương song song theo hàng ngang
+    #    Row i: ch[i] của mọi volume được crawl đồng thời
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _bounded(coro):
+        async with semaphore:
+            return await coro
+
+    for row in range(max_chapters_in_vol):
+        row_tasks = []
+        for vol in volumes:
+            if row >= len(vol["chapters"]):
+                continue   # volume này ít chương hơn
+            ch        = vol["chapters"][row]
+            global_idx = vol["offset"] + row + 1
+            row_tasks.append(
+                _bounded(_crawl_and_upload_chapter(
+                    idx=global_idx,
+                    total=total,
+                    ch=ch,
+                    volume_id=vol["volume_id"],
+                ))
+            )
+        if row_tasks:
+            await asyncio.gather(*row_tasks)
+
+    # 8. Thêm vào skip list sau khi crawl xong
+    add_skip_book(book_url)
+    print(f"  [book] ✅ Hoàn thành: {info['name']}")
 
 
 # ------------------------------------------------------------------ #
@@ -245,19 +350,21 @@ async def crawl_book(book_url: str, chapter_limit: int | None = None):
 
 async def main():
     parser = argparse.ArgumentParser(description="Crawler metruyenchu.co")
-    parser.add_argument("--url",   type=str, default=None,
+    parser.add_argument("--url",     type=str, default=None,
                         help="URL 1 cuốn sách cụ thể")
-    parser.add_argument("--pages", type=int, default=1,
+    parser.add_argument("--pages",   type=int, default=1,
                         help="Số trang danh sách cần crawl")
-    parser.add_argument("--sort",  type=str, default="totalViews",
+    parser.add_argument("--sort",    type=str, default="totalViews",
                         help="Sắp xếp danh sách: totalViews | updatedAt | ...")
-    parser.add_argument("--limit", type=int, default=None,
+    parser.add_argument("--limit",   type=int, default=None,
                         help="Giới hạn số chương mỗi sách (dùng để test)")
+    parser.add_argument("--concurrency", type=int, default=5,
+                        help="Số chương crawl đồng thời trong 1 volume (mặc định: 5)")
     args = parser.parse_args()
 
     if args.url:
         # Crawl 1 sách cụ thể
-        await crawl_book(args.url, args.limit)
+        await crawl_book(args.url, args.limit, args.concurrency)
     else:
         # Crawl theo danh sách
         seen: set[str] = set()
@@ -269,7 +376,7 @@ async def main():
                 if url in seen:
                     continue
                 seen.add(url)
-                await crawl_book(url, args.limit)
+                await crawl_book(url, args.limit, args.concurrency)
 
 
 if __name__ == "__main__":

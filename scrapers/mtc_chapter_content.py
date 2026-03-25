@@ -1,16 +1,16 @@
 # scrapers/mtc_chapter_content.py
 # Lấy nội dung chương từ metruyenchu.co và chuyển sang dạng Markdown
 
-import requests
-from bs4 import BeautifulSoup
 import re
+from bs4 import BeautifulSoup
 
-from core.config import MTC_HEADERS
+from core.req_config import proxy_get_async
 
 
-def get_chapter_content(chapter_url: str) -> dict:
+async def get_chapter_content_async(chapter_url: str) -> dict:
     """
-    Tải trang chương và trả về nội dung dạng Markdown.
+    Async: Tải trang chương và trả về nội dung dạng Markdown.
+    Dùng proxy rotation + retry 429 tự động qua proxy_get_async.
 
     Trả về:
         {
@@ -21,7 +21,7 @@ def get_chapter_content(chapter_url: str) -> dict:
         }
     """
     try:
-        resp = requests.get(chapter_url, headers=MTC_HEADERS, timeout=60)
+        resp = await proxy_get_async(chapter_url)
         if resp.status_code != 200:
             return {"ok": False, "error": f"HTTP {resp.status_code}"}
         html = resp.text
@@ -32,18 +32,11 @@ def get_chapter_content(chapter_url: str) -> dict:
 
     # --- Tên chương ---
     title = ""
-
     span = soup.find("span", class_="text-neutral-400")
     if span:
         raw_title = span.get_text(strip=True)
-        # Xử lý trường hợp có "::" hoặc ": :" thành ": "
         title = raw_title.replace("::", ":").replace(": :", ": ")
-    
-    # Nếu vẫn muốn loại bỏ khoảng trắng thừa quanh dấu :
-    title = re.sub(r'\s*:\s*', ': ', title)
-
-    # Hoặc cách ngắn gọn hơn (nếu chỉ có 1 span kiểu này):
-    # title = soup.find("span", {"class": "text-neutral-400"}).get_text(strip=True) if soup.find("span", {"class": "text-neutral-400"}) else ""
+    title = re.sub(r"\s*:\s*", ": ", title)
 
     # --- Nội dung ---
     content_md = _extract_content(soup, title)
@@ -88,7 +81,6 @@ def _extract_content(soup: BeautifulSoup, chapter_title: str) -> str:
     if not paragraphs:
         return ""
 
-    # Tạo Markdown: tiêu đề + nội dung
     lines: list[str] = []
     if chapter_title:
         lines.append(f"# {chapter_title}\n")
