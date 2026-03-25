@@ -1,39 +1,79 @@
-# Mê Truyện Chữ (MTC) Link Extractor
+# Mê Truyện Chữ (MTC) Crawler
 
-Dự án này giúp trích xuất link truyện từ trang danh sách của Metruyenchu.co.
+Cào truyện từ metruyenchu.co: tạo sách, chia volume (100 chương/vol), tải ảnh bìa, upload chương dạng `.md` lên backend server.
 
-## Hướng dẫn cài đặt
+## Cấu trúc dự án
 
-Để cài đặt và chạy script, bạn hãy mở terminal tại thư mục này và thực hiện các bước sau:
+```
+crawlMTC/
+├── core/
+│   ├── config.py            # Cấu hình: JWT, BASE_URL, MTC_BASE, headers
+│   └── mtc_categories.py    # Mapping thể loại → category_id
+├── scrapers/
+│   ├── mtc_book.py          # Lấy thông tin sách & ảnh bìa
+│   ├── mtc_chapters.py      # Detect next-action hash + lấy danh sách chương
+│   └── mtc_chapter_content.py  # Lấy nội dung chương → Markdown
+├── extractors/              # Các extractor cũ (giữ nguyên)
+├── crawl_mtc.py             # 🚀 Script chính
+├── map_categories.py        # Mapping cũ (giữ nguyên)
+└── requirements.txt
+```
 
-### 1. Tạo môi trường ảo (Virtual Environment)
+## Cài đặt
+
 ```bash
+# Tạo và kích hoạt môi trường ảo
 python -m venv myenv
-```
-
-### 2. Kích hoạt môi trường ảo
-Trên Windows:
-```bash
 myenv\Scripts\activate
-```
 
-### 3. Cài đặt các thư viện cần thiết
-```bash
+# Cài thư viện
 pip install -r requirements.txt
+
+# Cài Playwright browsers (cần cho lần đầu)
+playwright install chromium
 ```
 
-## Hướng dẫn sử dụng
+## Cấu hình
 
-### Trích xuất link truyện
-Chạy script `extract_links.py` để lấy danh sách link truyện:
+Mở `core/config.py` và cập nhật:
+- `JWT_TOKEN`: Token xác thực backend
+- `BASE_URL`: URL backend server
+
+## Sử dụng
+
+### Crawl 1 truyện cụ thể
+
 ```bash
-python extract_links.py
+python crawl_mtc.py --url https://metruyenchu.co/truyen/<slug>
 ```
 
-*Lưu ý: Mặc định script sẽ đọc từ file `srearch.html`. Nếu bạn muốn tải trực tiếp từ URL, hãy mở file `extract_links.py` và sửa `use_local_file = False`.*
+### Crawl với giới hạn chương (để test)
 
-## Các file trong dự án
-- `extract_links.py`: Script chính để trích xuất link.
-- `requirements.txt`: Danh sách các thư viện cần thiết.
-- `srearch.html`: File HTML mẫu để trích xuất dữ liệu.
-- `map_categories.py`: Script hỗ trợ mapping thể loại truyện.
+```bash
+python crawl_mtc.py --url https://metruyenchu.co/truyen/<slug> --limit 5
+```
+
+### Crawl danh sách truyện (nhiều trang)
+
+```bash
+python crawl_mtc.py --pages 2 --sort totalViews
+```
+
+### Tham số dòng lệnh
+
+| Tham số | Mặc định | Mô tả |
+|---------|----------|-------|
+| `--url` | — | URL truyện cụ thể |
+| `--pages` | `1` | Số trang danh sách cần crawl |
+| `--sort` | `totalViews` | Sắp xếp: `totalViews`, `updatedAt` |
+| `--limit` | — | Giới hạn số chương mỗi sách |
+
+## Cơ chế hoạt động
+
+1. **Lấy danh sách truyện**: Tải trang `/danh-sach` và parse link truyện
+2. **Lấy thông tin sách**: Parse tên, tác giả, thể loại, ảnh bìa từ trang truyện
+3. **Detect next-action hash**: Dùng Playwright để bắt hash Next.js Server Action
+4. **Lấy danh sách chương**: Gửi POST request trực tiếp với hash vừa detect
+5. **Tạo sách trên backend**: `POST /Book/create` kèm ảnh bìa
+6. **Tạo volume**: Mỗi 100 chương tạo 1 volume (`POST /Book/Volume/create`)
+7. **Upload chương**: Nội dung parse thành Markdown → `POST /Book/Volume/Chapter/create`
