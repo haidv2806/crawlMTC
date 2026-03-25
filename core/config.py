@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 
 # ================== BACKEND API ==================
-JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyLCJqdGkiOiJiNTE3N2NmNC00Yzc0LTRjZTUtYmI4OS00Y2Q1MTMzNDBkZmIiLCJpYXQiOjE3NzQ0NzM3NzUsImV4cCI6MTc3NzA2NTc3NX0.RZ9l_GjS3nNPgLUBkbodpx_V-KtanLPkBtg2JHT4REA"
+JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjozLCJqdGkiOiI0Mjg0Yjg3My04MjA3LTRkY2EtYWU4Mi03NTc2N2NmOTUxZGIiLCJpYXQiOjE3NzQ0NzgyMjksImV4cCI6MTc3NzA3MDIyOX0.8qO--Gy6PFOnQthocieEsRCm11Elqs6ZcvJKvcEYpyM"
 
-BASE_URL = "http://localhost:3000"
-# BASE_URL = "https://e-books.info.vn"
+# BASE_URL = "http://localhost:3000"
+BASE_URL = "https://e-books.info.vn"
 
 HEADERS = {
     "Authorization": f"Bearer {JWT_TOKEN}"

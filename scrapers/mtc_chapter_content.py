@@ -39,7 +39,7 @@ async def get_chapter_content_async(chapter_url: str) -> dict:
     title = re.sub(r"\s*:\s*", ": ", title)
 
     # --- Nội dung ---
-    content_md = _extract_content(soup, title)
+    content_md = _extract_content(soup)
 
     if not content_md:
         return {"ok": False, "error": "Nội dung trống"}
@@ -47,7 +47,7 @@ async def get_chapter_content_async(chapter_url: str) -> dict:
     return {"ok": True, "title": title, "content": content_md}
 
 
-def _extract_content(soup: BeautifulSoup, chapter_title: str) -> str:
+def _extract_content(soup: BeautifulSoup) -> str:
     """
     Extract nội dung từ <article> hoặc các div chứa nội dung chương.
     Chuyển mỗi <p> thành 1 đoạn văn Markdown (cách nhau 1 dòng trống).
@@ -82,8 +82,6 @@ def _extract_content(soup: BeautifulSoup, chapter_title: str) -> str:
         return ""
 
     lines: list[str] = []
-    if chapter_title:
-        lines.append(f"# {chapter_title}\n")
     lines.extend(paragraphs)
 
     return "\n\n".join(lines)
