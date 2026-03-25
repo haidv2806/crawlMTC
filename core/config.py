@@ -32,20 +32,16 @@ MTC_HEADERS = {
 }
 
 # ================== PROXY ROTATION ==================
-# Format: "ip:port:username:password"
-# Để bỏ trống danh sách này nếu không dùng proxy
-raw_proxies = [
-    "45.61.96.150:6130:smyqziak:iqpff2ivwfi9",
-    "64.137.121.71:6326:smyqziak:iqpff2ivwfi9",
-    "82.24.236.90:7900:smyqziak:iqpff2ivwfi9",
-    "45.159.53.38:7410:smyqziak:iqpff2ivwfi9",
-    "154.6.121.19:5986:smyqziak:iqpff2ivwfi9",
-    "45.61.96.117:6097:smyqziak:iqpff2ivwfi9",
-    "45.38.67.11:6943:smyqziak:iqpff2ivwfi9",
-    "31.58.19.223:6495:smyqziak:iqpff2ivwfi9",
-    "45.39.50.245:6663:smyqziak:iqpff2ivwfi9",
-    "45.147.187.69:6442:smyqziak:iqpff2ivwfi9",
-]
+# Đọc proxy từ file proxies.txt (format mỗi dòng: ip:port:username:password)
+_PROXIES_FILE = Path(__file__).parent.parent / "proxies.txt"
+
+def _load_raw_proxies() -> list[str]:
+    if not _PROXIES_FILE.exists():
+        return []
+    lines = _PROXIES_FILE.read_text(encoding="utf-8").splitlines()
+    return [l.strip() for l in lines if l.strip() and ":" in l]
+
+raw_proxies = _load_raw_proxies()
 
 
 def _parse_proxy(proxy_str: str) -> dict:

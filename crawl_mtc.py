@@ -210,7 +210,6 @@ async def _crawl_and_upload_chapter(
 async def crawl_book(
     book_url: str,
     chapter_limit: int | None = None,
-    max_concurrent: int = 5,
 ):
     """
     Crawl 1 cuốn sách:
@@ -313,14 +312,8 @@ async def crawl_book(
     # 6. Tời đa số chương trong 1 volume
     max_chapters_in_vol = max(len(v["chapters"]) for v in volumes)
 
-    # 7. Cào các chương song song theo hàng ngang
+    # 7. Cào các chương song song theo hàng ngang (không giới hạn concurrency)
     #    Row i: ch[i] của mọi volume được crawl đồng thời
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def _bounded(coro):
-        async with semaphore:
-            return await coro
-
     for row in range(max_chapters_in_vol):
         row_tasks = []
         for vol in volumes:
@@ -329,12 +322,12 @@ async def crawl_book(
             ch        = vol["chapters"][row]
             global_idx = vol["offset"] + row + 1
             row_tasks.append(
-                _bounded(_crawl_and_upload_chapter(
+                _crawl_and_upload_chapter(
                     idx=global_idx,
                     total=total,
                     ch=ch,
                     volume_id=vol["volume_id"],
-                ))
+                )
             )
         if row_tasks:
             await asyncio.gather(*row_tasks)
@@ -350,33 +343,36 @@ async def crawl_book(
 
 async def main():
     parser = argparse.ArgumentParser(description="Crawler metruyenchu.co")
-    parser.add_argument("--url",     type=str, default=None,
+    parser.add_argument("--url",        type=str, default=None,
                         help="URL 1 cuốn sách cụ thể")
-    parser.add_argument("--pages",   type=int, default=1,
-                        help="Số trang danh sách cần crawl")
-    parser.add_argument("--sort",    type=str, default="totalViews",
+    parser.add_argument("--start-page", type=int, default=1,
+                        help="Trang bắt đầu trong danh sách (mặc định: 1)")
+    parser.add_argument("--pages",      type=int, default=1,
+                        help="Trang kết thúc (inclusive). Ví dụ: --start-page 2 --pages 5 sẽ crawl trang 2–5")
+    parser.add_argument("--sort",       type=str, default="totalViews",
                         help="Sắp xếp danh sách: totalViews | updatedAt | ...")
-    parser.add_argument("--limit",   type=int, default=None,
+    parser.add_argument("--limit",      type=int, default=None,
                         help="Giới hạn số chương mỗi sách (dùng để test)")
-    parser.add_argument("--concurrency", type=int, default=5,
-                        help="Số chương crawl đồng thời trong 1 volume (mặc định: 5)")
     args = parser.parse_args()
+
+    start_page = args.start_page
+    end_page   = max(args.pages, start_page)   # pages giờ là trang kết thúc
 
     if args.url:
         # Crawl 1 sách cụ thể
-        await crawl_book(args.url, args.limit, args.concurrency)
+        await crawl_book(args.url, args.limit)
     else:
-        # Crawl theo danh sách
+        # Crawl theo danh sách từ start_page đến end_page
         seen: set[str] = set()
-        for page in range(1, args.pages + 1):
-            print(f"\n[search] Trang {page}/{args.pages}...")
+        for page in range(start_page, end_page + 1):
+            print(f"\n[search] Trang {page} (từ {start_page} đến {end_page})...")
             urls = fetch_book_list(page=page, sort=args.sort)
             print(f"[search] Tìm thấy {len(urls)} truyện trang {page}")
             for url in urls:
                 if url in seen:
                     continue
                 seen.add(url)
-                await crawl_book(url, args.limit, args.concurrency)
+                await crawl_book(url, args.limit)
 
 
 if __name__ == "__main__":
