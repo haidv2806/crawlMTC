@@ -98,7 +98,7 @@ def api_create_book(info: dict, cover_path: str) -> int | None:
         ("sub_names",   json.dumps(info.get("sub_names", []), ensure_ascii=False)),
         ("authors",     json.dumps(info["authors"], ensure_ascii=False)),
         ("status",      info["status"]),
-        ("description", info["description"]),
+        ("description", (info.get("description") or "")[:1000]),
     ]
     for cat_id in categories:
         data.append(("categories[]", str(cat_id)))
